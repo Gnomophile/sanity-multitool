@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Sanity — мультитул по зонам
 // @namespace    starterapp-delivery-zones
-// @version      3.1
-// @description  Чекбоксы, копирование/вставка зон, массовое редактирование условий доставки
+// @version      3.6
+// @description  Чекбоксы, копирование/вставка зон, массовое редактирование условий доставки (+ динамический расчёт/компенсация)
 // @match        https://my.starterapp.ru/*
 // @grant        none
 // @run-at       document-idle
@@ -190,51 +190,114 @@
       showToast('Ошибка: ' + e.message, 'error');
     }
   }
-    function buildGradationEditor(rows) {
+    function buildGradationEditor(rows, dynamicCalc, defaultCompType) {
     const wrap = document.createElement('div');
     wrap.style.cssText = 'margin-top:6px;';
     const table = document.createElement('div');
     table.setAttribute('data-sz-grad-table', '1');
-    table.style.cssText = 'display:flex; flex-direction:column; gap:4px;';
+    table.style.cssText = 'display:flex; flex-direction:column; gap:8px;';
 
-    function addRow(basketPriceTo = '', price = '') {
+    function renderCompTypeSelect(rawValue) {
+      // Известные варианты, которые видно в нативном селекте Sanity.
+      // Если реальное сырое значение не похоже ни на одно из них — сохраняем
+      // его as-is третьим (скрытым) пунктом, чтобы при "Применить" не затереть
+      // существующие данные незнакомым форматом.
+      const known = [
+        { key: '0', raw: 'percent', label: 'В процентах' },
+        { key: '1', raw: 'currency', label: 'В валюте' }
+      ];
+      const rawMap = { '': null };
+      let optionsHtml = '<option value="">- тип -</option>';
+      let matchedKey = '';
+      for (const opt of known) {
+        rawMap[opt.key] = opt.raw;
+        const isMatch = rawValue !== undefined && rawValue !== null && String(rawValue) === String(opt.raw);
+        if (isMatch) matchedKey = opt.key;
+        optionsHtml += '<option value="' + opt.key + '"' + (isMatch ? ' selected' : '') + '>' + opt.label + '</option>';
+      }
+      if (rawValue !== undefined && rawValue !== null && !matchedKey) {
+        console.warn('[SZ] Неизвестное сырое значение compensationType — сообщи об этом:', rawValue, typeof rawValue);
+        rawMap['unknown'] = rawValue;
+        optionsHtml += '<option value="unknown" selected>⚠ текущее значение (' + JSON.stringify(rawValue) + ')</option>';
+        matchedKey = 'unknown';
+      }
+      const encodedMap = JSON.stringify(rawMap).replace(/"/g, '&quot;');
+      return '<select style="padding:8px 10px;border:1px solid #ccc;border-radius:6px;font-size:16px;" ' +
+        'data-sz-grad-comp-type data-sz-raw-map="' + encodedMap + '">' + optionsHtml + '</select>';
+    }
+
+    function addRow(basketPriceTo, price, compType, compValue) {
+      basketPriceTo = basketPriceTo ?? '';
+      price = price ?? '';
+      compValue = compValue ?? '';
       const row = document.createElement('div');
-      row.style.cssText = 'display:flex; gap:6px; align-items:center;';
-      row.innerHTML = `
-        <span style="font-size:12px;color:#888;white-space:nowrap;">до ₽</span>
-        <input type="number" placeholder="сумма корзины" value="${basketPriceTo}"
-          style="width:110px;padding:4px 6px;border:1px solid #ccc;border-radius:4px;font-size:13px;"
-          data-sz-grad-to>
-        <span style="font-size:12px;color:#888;">→ ₽</span>
-        <input type="number" placeholder="цена" value="${price}"
-          style="width:90px;padding:4px 6px;border:1px solid #ccc;border-radius:4px;font-size:13px;"
-          data-sz-grad-price>
-        <button type="button" style="padding:2px 8px;border:none;background:#e74c3c;color:#fff;border-radius:4px;cursor:pointer;font-size:13px;" data-sz-grad-del>✕</button>
-      `;
+      row.style.cssText = 'display:flex; gap:10px; align-items:center; flex-wrap:wrap;';
+      if (dynamicCalc) {
+        row.innerHTML =
+          '<span style="font-size:14px;color:#888;white-space:nowrap;">до &#8381;</span>' +
+          '<input type="number" placeholder="сумма корзины" value="' + basketPriceTo + '" ' +
+            'style="width:130px;padding:8px 10px;border:1px solid #ccc;border-radius:6px;font-size:16px;" data-sz-grad-to>' +
+          '<span style="font-size:14px;color:#888;">&rarr;</span>' +
+          renderCompTypeSelect(compType) +
+          '<input type="number" placeholder="значение" value="' + compValue + '" ' +
+            'style="width:110px;padding:8px 10px;border:1px solid #ccc;border-radius:6px;font-size:16px;" data-sz-grad-comp-value>' +
+          '<button type="button" style="padding:6px 12px;border:none;background:#e74c3c;color:#fff;border-radius:6px;cursor:pointer;font-size:15px;" data-sz-grad-del>&#10005;</button>';
+      } else {
+        row.innerHTML =
+          '<span style="font-size:14px;color:#888;white-space:nowrap;">до &#8381;</span>' +
+          '<input type="number" placeholder="сумма корзины" value="' + basketPriceTo + '" ' +
+            'style="width:130px;padding:8px 10px;border:1px solid #ccc;border-radius:6px;font-size:16px;" data-sz-grad-to>' +
+          '<span style="font-size:14px;color:#888;">&rarr; &#8381;</span>' +
+          '<input type="number" placeholder="цена" value="' + price + '" ' +
+            'style="width:110px;padding:8px 10px;border:1px solid #ccc;border-radius:6px;font-size:16px;" data-sz-grad-price>' +
+          '<button type="button" style="padding:6px 12px;border:none;background:#e74c3c;color:#fff;border-radius:6px;cursor:pointer;font-size:15px;" data-sz-grad-del>&#10005;</button>';
+      }
       row.querySelector('[data-sz-grad-del]').addEventListener('click', () => row.remove());
       table.appendChild(row);
     }
 
-    for (const r of rows) addRow(r.basketPriceTo, r.price);
+    for (const r of rows) {
+      const rowCompType = (r.compensation?.compensationType ?? defaultCompType);
+      if (dynamicCalc) console.log('[SZ] шаг градации, сырое значение compensationType:', r.compensation?.compensationType, '(если пусто — унаследовано с уровня типа доставки:', defaultCompType, ')');
+      addRow(r.basketPriceTo, r.price, rowCompType, r.compensation?.compensationValue);
+    }
 
     const addBtn = document.createElement('button');
     addBtn.type = 'button';
     addBtn.textContent = '+ Добавить ступень';
-    addBtn.style.cssText = 'margin-top:4px;padding:4px 10px;border:1px dashed #4a90e2;background:transparent;color:#4a90e2;border-radius:4px;cursor:pointer;font-size:12px;';
-    addBtn.addEventListener('click', () => addRow());
+    addBtn.style.cssText = 'margin-top:8px;padding:8px 14px;border:1px dashed #4a90e2;background:transparent;color:#4a90e2;border-radius:6px;cursor:pointer;font-size:14px;';
+    addBtn.addEventListener('click', () => addRow(undefined, undefined, defaultCompType, undefined));
 
     wrap.appendChild(table);
     wrap.appendChild(addBtn);
     return wrap;
   }
 
-  function readGradation(container) {
+  function readGradation(container, dynamicCalc) {
     const rows = container.querySelectorAll('[data-sz-grad-table] > div');
     const result = [];
     for (const row of rows) {
-      const to    = parseFloat(row.querySelector('[data-sz-grad-to]').value);
-      const price = parseFloat(row.querySelector('[data-sz-grad-price]').value);
-      if (!isNaN(to) && !isNaN(price)) result.push({ _key: newKey(), _type: 'deliveryPrice', basketPriceTo: to, price });
+      const to = parseFloat(row.querySelector('[data-sz-grad-to]')?.value);
+      if (isNaN(to)) continue;
+      if (dynamicCalc) {
+        const typeEl  = row.querySelector('[data-sz-grad-comp-type]');
+        const valueEl = row.querySelector('[data-sz-grad-comp-value]');
+        const selectedKey = typeEl ? typeEl.value : '';
+        const value = parseFloat(valueEl?.value);
+        if (selectedKey === '' || isNaN(value)) continue;
+        let rawMap = {};
+        try { rawMap = JSON.parse(typeEl.getAttribute('data-sz-raw-map') || '{}'); } catch (e) { /* ignore */ }
+        const compensationType = rawMap[selectedKey];
+        result.push({
+          _key: newKey(),
+          _type: 'deliveryPrice',
+          basketPriceTo: to,
+          compensation: { _type: 'compensation', compensationType, compensationValue: value }
+        });
+      } else {
+        const price = parseFloat(row.querySelector('[data-sz-grad-price]')?.value);
+        if (!isNaN(price)) result.push({ _key: newKey(), _type: 'deliveryPrice', basketPriceTo: to, price });
+      }
     }
     return result;
   }
@@ -242,51 +305,60 @@
   function buildDeliveryTypeSection(label, dtpData, isCollapsed) {
     const section = document.createElement('div');
     section.style.cssText = 'margin-top:10px;';
+    const dynamicCalc  = dtpData?.dynamicCalc === true;
     const existingTime = dtpData?.deliveryTime  ?? '';
     const existingMin  = dtpData?.minBasketPrice ?? '';
     const existingDef  = dtpData?.defaultDeliveryPrice ?? '';
     const existingGrad = dtpData?.deliveryPrice || [];
+    if (dynamicCalc) {
+      console.log('[SZ] тип "' + label + '", сырое значение compensation.compensationType на уровне типа:', dtpData?.compensation?.compensationType, '(typeof: ' + typeof dtpData?.compensation?.compensationType + ')');
+    }
 
     const content = document.createElement('div');
     content.setAttribute('data-sz-section', label);
-    content.style.cssText = 'padding:10px;background:#f8f9fa;border-radius:6px;border:1px solid #e0e0e0;';
+    content.setAttribute('data-sz-dynamic-calc', dynamicCalc ? '1' : '0');
+    content.style.cssText = 'padding:16px;background:#f8f9fa;border-radius:8px;border:1px solid #e0e0e0;';
     content.innerHTML = `
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px;">
-        <label style="font-size:12px;color:#555;">Время доставки (мин)
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin-bottom:14px;">
+        <label style="font-size:14px;color:#555;">Время доставки (мин)
           <input type="number" placeholder="не менять" value="${existingTime}"
-            style="display:block;width:100%;margin-top:3px;padding:5px 7px;border:1px solid #ccc;border-radius:4px;font-size:13px;box-sizing:border-box;"
+            style="display:block;width:100%;margin-top:5px;padding:9px 10px;border:1px solid #ccc;border-radius:6px;font-size:16px;box-sizing:border-box;"
             data-sz-field="deliveryTime">
         </label>
-        <label style="font-size:12px;color:#555;">Мин. сумма корзины
+        <label style="font-size:14px;color:#555;">Мин. сумма корзины
           <input type="number" placeholder="не менять" value="${existingMin}"
-            style="display:block;width:100%;margin-top:3px;padding:5px 7px;border:1px solid #ccc;border-radius:4px;font-size:13px;box-sizing:border-box;"
+            style="display:block;width:100%;margin-top:5px;padding:9px 10px;border:1px solid #ccc;border-radius:6px;font-size:16px;box-sizing:border-box;"
             data-sz-field="minBasketPrice">
         </label>
-        <label style="font-size:12px;color:#555;">Цена по умолчанию
+        <label style="font-size:14px;color:#555;">Цена по умолчанию
           <input type="number" placeholder="не менять" value="${existingDef}"
-            style="display:block;width:100%;margin-top:3px;padding:5px 7px;border:1px solid #ccc;border-radius:4px;font-size:13px;box-sizing:border-box;"
+            style="display:block;width:100%;margin-top:5px;padding:9px 10px;border:1px solid #ccc;border-radius:6px;font-size:16px;box-sizing:border-box;"
             data-sz-field="defaultDeliveryPrice">
         </label>
       </div>
-      <div style="font-size:12px;color:#555;margin-bottom:4px;">Градация цен <span style="color:#888;">(пустая таблица = очистить, не трогайте если не нужно менять)</span></div>
+      ${dynamicCalc ? `
+      <div style="font-size:13px;color:#8e44ad;background:#f4ecfb;border:1px solid #e3d3f5;border-radius:6px;padding:8px 12px;margin-bottom:12px;">
+        ⚡ Активирован динамический расчёт — ступени градации задаются компенсацией (тип и значение), а не фиксированной ценой.
+      </div>` : ''}
+      <div style="font-size:14px;color:#555;margin-bottom:8px;">Градация цен <span style="color:#888;">(пустая таблица = очистить, не трогайте если не нужно менять)</span></div>
     `;
     const gradWrap = document.createElement('div');
     gradWrap.setAttribute('data-sz-grad-wrap', '1');
-    gradWrap.appendChild(buildGradationEditor(existingGrad));
+    gradWrap.appendChild(buildGradationEditor(existingGrad, dynamicCalc, dtpData?.compensation?.compensationType));
     content.appendChild(gradWrap);
 
     if (isCollapsed) {
       const details = document.createElement('details');
-      details.style.cssText = 'margin-top:10px;';
+      details.style.cssText = 'margin-top:14px;';
       const summary = document.createElement('summary');
-      summary.style.cssText = 'cursor:pointer;font-size:13px;font-weight:600;color:#555;user-select:none;';
+      summary.style.cssText = 'cursor:pointer;font-size:16px;font-weight:600;color:#555;user-select:none;padding:4px 0;';
       summary.textContent = label;
       details.appendChild(summary);
       details.appendChild(content);
       section.appendChild(details);
     } else {
       const titleEl = document.createElement('div');
-      titleEl.style.cssText = 'font-size:13px;font-weight:700;color:#333;margin-bottom:6px;';
+      titleEl.style.cssText = 'font-size:16px;font-weight:700;color:#333;margin-bottom:8px;';
       titleEl.textContent = label;
       section.appendChild(titleEl);
       section.appendChild(content);
@@ -338,23 +410,25 @@
       position:fixed;inset:0;z-index:999998;
       background:rgba(0,0,0,0.45);
       display:flex;align-items:center;justify-content:center;
+      font-family:'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
     `;
     const modal = document.createElement('div');
     modal.style.cssText = `
-      background:#fff;border-radius:10px;padding:24px;
-      width:560px;max-width:95vw;max-height:85vh;
+      background:#fff;border-radius:12px;padding:32px;
+      width:760px;max-width:96vw;max-height:90vh;
       overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.25);
       position:relative;
+      font-family:'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
     `;
     const title = document.createElement('div');
-    title.style.cssText = 'font-size:16px;font-weight:700;margin-bottom:4px;';
+    title.style.cssText = 'font-size:22px;font-weight:700;margin-bottom:6px;';
     title.textContent = '✏️ Изменить условия доставки';
     const subtitle = document.createElement('div');
-    subtitle.style.cssText = 'font-size:12px;color:#888;margin-bottom:14px;';
+    subtitle.style.cssText = 'font-size:15px;color:#888;margin-bottom:20px;';
     subtitle.textContent = `Зоны: ${targetZones.map(z => z.name).join(', ')}`;
     const closeBtn = document.createElement('button');
     closeBtn.textContent = '✕';
-    closeBtn.style.cssText = 'position:absolute;top:14px;right:16px;background:none;border:none;font-size:18px;cursor:pointer;color:#999;';
+    closeBtn.style.cssText = 'position:absolute;top:20px;right:22px;background:none;border:none;font-size:24px;cursor:pointer;color:#999;line-height:1;';
     closeBtn.addEventListener('click', () => overlay.remove());
 
     modal.appendChild(closeBtn);
@@ -368,9 +442,9 @@
     const applyBtn = document.createElement('button');
     applyBtn.textContent = '✅ Применить';
     applyBtn.style.cssText = `
-      margin-top:18px;width:100%;padding:12px;
-      background:#4a90e2;color:#fff;border:none;border-radius:6px;
-      font-size:14px;font-weight:700;cursor:pointer;
+      margin-top:22px;width:100%;padding:15px;
+      background:#4a90e2;color:#fff;border:none;border-radius:8px;
+      font-size:16px;font-weight:700;cursor:pointer;
     `;
     applyBtn.addEventListener('click', () => applyConditions(overlay, modal, projectId, shopId, doc, targetZones, typeNameMap, allTypeNames));
     modal.appendChild(applyBtn);
@@ -388,11 +462,12 @@
       const minVal  = section.querySelector('[data-sz-field="minBasketPrice"]')?.value.trim();
       const defVal  = section.querySelector('[data-sz-field="defaultDeliveryPrice"]')?.value.trim();
       const gradWrap = section.querySelector('[data-sz-grad-wrap]');
+      const dynamicCalc = section.getAttribute('data-sz-dynamic-calc') === '1';
       const entry = {};
       if (timeVal !== '') entry.deliveryTime = parseFloat(timeVal);
       if (minVal  !== '') entry.minBasketPrice = parseFloat(minVal);
       if (defVal  !== '') entry.defaultDeliveryPrice = parseFloat(defVal);
-      if (gradWrap) entry.deliveryPrice = readGradation(gradWrap);
+      if (gradWrap) entry.deliveryPrice = readGradation(gradWrap, dynamicCalc);
       if (Object.keys(entry).length > 0) changes[typeName] = entry;
     }
     if (Object.keys(changes).length === 0) { showToast('Нет изменений для применения', 'warning'); return; }
