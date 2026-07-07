@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Sanity — мультитул по зонам
 // @namespace    starterapp-delivery-zones
-// @version      3.6
-// @description  Чекбоксы, копирование/вставка зон, массовое редактирование условий доставки (+ динамический расчёт/компенсация)
+// @version      3.7
+// @description  Чекбоксы, копирование/вставка зон, массовое редактирование условий доставки (+ динамический расчёт/компенсация, предупреждения о доставочном блюде)
 // @match        https://my.starterapp.ru/*
 // @grant        none
 // @run-at       document-idle
@@ -79,7 +79,7 @@
     return street || doc.name?.ru || doc._id;
   }
 
-  function showToast(message, type = 'info') {
+  function showToast(message, type = 'info', duration = 5000) {
     const existing = document.getElementById('sz-toast');
     if (existing) existing.remove();
     const colors = { info: '#4a90e2', success: '#27ae60', error: '#e74c3c', warning: '#f39c12' };
@@ -89,12 +89,12 @@
       position:fixed; bottom:24px; right:24px; z-index:999999;
       background:${colors[type]}; color:#fff;
       padding:12px 18px; border-radius:8px; font-size:14px;
-      box-shadow:0 4px 12px rgba(0,0,0,0.2); max-width:360px;
+      box-shadow:0 4px 12px rgba(0,0,0,0.2); max-width:420px; max-height:70vh; overflow-y:auto;
       line-height:1.5; white-space:pre-line; transition:opacity 0.3s;
     `;
     toast.textContent = message;
     document.body.appendChild(toast);
-    setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 300); }, 5000);
+    setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 300); }, duration);
   }
 
   function updateCopyButtonLabel() {
@@ -306,9 +306,11 @@
     const section = document.createElement('div');
     section.style.cssText = 'margin-top:10px;';
     const dynamicCalc  = dtpData?.dynamicCalc === true;
-    const existingTime = dtpData?.deliveryTime  ?? '';
+    const timeFieldName = dynamicCalc ? 'dynamicDeliveryTime' : 'deliveryTime';
+    const priceFieldName = dynamicCalc ? 'defaultDynamicDeliveryPrice' : 'defaultDeliveryPrice';
+    const existingTime = dtpData?.[timeFieldName]  ?? '';
     const existingMin  = dtpData?.minBasketPrice ?? '';
-    const existingDef  = dtpData?.defaultDeliveryPrice ?? '';
+    const existingDef  = dtpData?.[priceFieldName] ?? '';
     const existingGrad = dtpData?.deliveryPrice || [];
     if (dynamicCalc) {
       console.log('[SZ] тип "' + label + '", сырое значение compensation.compensationType на уровне типа:', dtpData?.compensation?.compensationType, '(typeof: ' + typeof dtpData?.compensation?.compensationType + ')');
@@ -317,23 +319,24 @@
     const content = document.createElement('div');
     content.setAttribute('data-sz-section', label);
     content.setAttribute('data-sz-dynamic-calc', dynamicCalc ? '1' : '0');
+    content.setAttribute('data-sz-price-field', priceFieldName);
     content.style.cssText = 'padding:16px;background:#f8f9fa;border-radius:8px;border:1px solid #e0e0e0;';
     content.innerHTML = `
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin-bottom:14px;">
-        <label style="font-size:14px;color:#555;">Время доставки (мин)
+        <label style="font-size:14px;color:#555;">${dynamicCalc ? 'Время динамической доставки (мин)' : 'Время доставки (мин)'}
           <input type="number" placeholder="не менять" value="${existingTime}"
             style="display:block;width:100%;margin-top:5px;padding:9px 10px;border:1px solid #ccc;border-radius:6px;font-size:16px;box-sizing:border-box;"
-            data-sz-field="deliveryTime">
+            data-sz-field="${timeFieldName}">
         </label>
         <label style="font-size:14px;color:#555;">Мин. сумма корзины
           <input type="number" placeholder="не менять" value="${existingMin}"
             style="display:block;width:100%;margin-top:5px;padding:9px 10px;border:1px solid #ccc;border-radius:6px;font-size:16px;box-sizing:border-box;"
             data-sz-field="minBasketPrice">
         </label>
-        <label style="font-size:14px;color:#555;">Цена по умолчанию
+        <label style="font-size:14px;color:#555;">${dynamicCalc ? 'Цена динамической доставки по умолчанию' : 'Цена по умолчанию'}
           <input type="number" placeholder="не менять" value="${existingDef}"
             style="display:block;width:100%;margin-top:5px;padding:9px 10px;border:1px solid #ccc;border-radius:6px;font-size:16px;box-sizing:border-box;"
-            data-sz-field="defaultDeliveryPrice">
+            data-sz-field="${priceFieldName}">
         </label>
       </div>
       ${dynamicCalc ? `
@@ -453,20 +456,66 @@
     document.body.appendChild(overlay);
   }
 
+  // Значение "цены" ступени градации для сравнения: обычная цена или, при
+  // динамическом расчёте, значение компенсации.
+  function gradRowValue(row, dynamicCalc) {
+    if (!row) return 0;
+    const v = dynamicCalc ? row.compensation?.compensationValue : row.price;
+    return (typeof v === 'number' && !isNaN(v)) ? v : 0;
+  }
+
+  function gradRowsToMap(rows, dynamicCalc) {
+    const map = {};
+    for (const r of (rows || [])) {
+      if (r?.basketPriceTo === undefined || r?.basketPriceTo === null) continue;
+      map[r.basketPriceTo] = gradRowValue(r, dynamicCalc);
+    }
+    return map;
+  }
+
+  // Собирает предупреждения "нужно проверить доставочное блюдо" для одной пары зона+тип:
+  // 1) новая цена > 0 и условия изменились -> предупреждение
+  // 2) было платно, стало бесплатно -> предупреждение
+  // 3) было бесплатно и осталось бесплатно -> без предупреждения
+  function collectPriceWarnings(zoneName, typeName, dtp, change, priceFieldName, dynamicCalc) {
+    const warnings = [];
+
+    const oldDefault = (typeof dtp?.[priceFieldName] === 'number') ? dtp[priceFieldName] : 0;
+    const newDefault = (priceFieldName in change) ? change[priceFieldName] : oldDefault;
+    if (newDefault !== oldDefault && (newDefault > 0 || oldDefault > 0)) {
+      warnings.push(`${zoneName} — ${typeName}: цена по умолчанию ${oldDefault}₽ → ${newDefault}₽`);
+    }
+
+    const oldGradMap = gradRowsToMap(dtp?.deliveryPrice, dynamicCalc);
+    const newGradMap = ('deliveryPrice' in change) ? gradRowsToMap(change.deliveryPrice, dynamicCalc) : oldGradMap;
+    const allKeys = new Set([...Object.keys(oldGradMap), ...Object.keys(newGradMap)]);
+    for (const key of allKeys) {
+      const oldVal = oldGradMap[key] ?? 0;
+      const newVal = newGradMap[key] ?? 0;
+      if (oldVal !== newVal && (newVal > 0 || oldVal > 0)) {
+        warnings.push(`${zoneName} — ${typeName}: ступень до ${key}₽: ${oldVal} → ${newVal}`);
+      }
+    }
+    return warnings;
+  }
+
   async function applyConditions(overlay, modal, projectId, shopId, doc, targetZones, typeNameMap, allTypeNames) {
-    const changes = {};
+    const changes  = {};
+    const typeMeta = {};
     for (const typeName of allTypeNames) {
       const section = modal.querySelector(`[data-sz-section="${typeName}"]`);
       if (!section) continue;
-      const timeVal = section.querySelector('[data-sz-field="deliveryTime"]')?.value.trim();
-      const minVal  = section.querySelector('[data-sz-field="minBasketPrice"]')?.value.trim();
-      const defVal  = section.querySelector('[data-sz-field="defaultDeliveryPrice"]')?.value.trim();
-      const gradWrap = section.querySelector('[data-sz-grad-wrap]');
-      const dynamicCalc = section.getAttribute('data-sz-dynamic-calc') === '1';
+      const dynamicCalc    = section.getAttribute('data-sz-dynamic-calc') === '1';
+      const priceFieldName = section.getAttribute('data-sz-price-field') || 'defaultDeliveryPrice';
+      typeMeta[typeName] = { dynamicCalc, priceFieldName };
+
       const entry = {};
-      if (timeVal !== '') entry.deliveryTime = parseFloat(timeVal);
-      if (minVal  !== '') entry.minBasketPrice = parseFloat(minVal);
-      if (defVal  !== '') entry.defaultDeliveryPrice = parseFloat(defVal);
+      section.querySelectorAll('[data-sz-field]').forEach(input => {
+        const fieldName = input.getAttribute('data-sz-field');
+        const val = input.value.trim();
+        if (val !== '') entry[fieldName] = parseFloat(val);
+      });
+      const gradWrap = section.querySelector('[data-sz-grad-wrap]');
       if (gradWrap) entry.deliveryPrice = readGradation(gradWrap, dynamicCalc);
       if (Object.keys(entry).length > 0) changes[typeName] = entry;
     }
@@ -480,6 +529,7 @@
       mutations.push({ createIfNotExists: { ...documents[0], _id: draftId } });
     }
 
+    const priceWarnings = [];
     for (const zone of targetZones) {
       for (const dtp of (zone.deliveryTypePrices || [])) {
         const typeName = typeNameMap[dtp.deliveryType?._ref];
@@ -487,11 +537,11 @@
         if (!change) continue;
         const path = `deliveryZones[_key=="${zone._key}"].deliveryTypePrices[_key=="${dtp._key}"]`;
         const setFields = {};
-        if ('deliveryTime'         in change) setFields[`${path}.deliveryTime`]         = change.deliveryTime;
-        if ('minBasketPrice'       in change) setFields[`${path}.minBasketPrice`]       = change.minBasketPrice;
-        if ('defaultDeliveryPrice' in change) setFields[`${path}.defaultDeliveryPrice`] = change.defaultDeliveryPrice;
-        if ('deliveryPrice'        in change) setFields[`${path}.deliveryPrice`]        = change.deliveryPrice;
+        for (const key of Object.keys(change)) setFields[`${path}.${key}`] = change[key];
         if (Object.keys(setFields).length > 0) mutations.push({ patch: { id: draftId, set: setFields } });
+
+        const meta = typeMeta[typeName];
+        if (meta) priceWarnings.push(...collectPriceWarnings(zone.name, typeName, dtp, change, meta.priceFieldName, meta.dynamicCalc));
       }
     }
 
@@ -507,7 +557,13 @@
       });
       const result = await r.json();
       if (r.ok) {
-        showToast(`✅ Условия обновлены в ${targetZones.length} зон(ах):\n` + Object.keys(changes).map(t => `• ${t}`).join('\n') + '\n\nНажмите «Опубликовать»', 'success');
+        let msg = `✅ Условия обновлены в ${targetZones.length} зон(ах):\n` + Object.keys(changes).map(t => `• ${t}`).join('\n') + '\n\nНажмите «Опубликовать»';
+        let type = 'success';
+        if (priceWarnings.length > 0) {
+          msg += '\n\n⚠️ Проверьте «Позицию для доставки из POS-системы» — цена изменилась:\n' + priceWarnings.map(w => `• ${w}`).join('\n');
+          type = 'warning';
+        }
+        showToast(msg, type, priceWarnings.length > 0 ? 12000 : 5000);
       } else {
         showToast('Ошибка Sanity: ' + JSON.stringify(result?.error || result), 'error');
       }
