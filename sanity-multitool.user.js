@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Sanity — мультитул по зонам
 // @namespace    starterapp-delivery-zones
-// @version      3.8
-// @description  Чекбоксы, копирование/вставка зон, массовое редактирование условий доставки (+ динамический расчёт/компенсация, типы оплаты, предупреждения о доставочном блюде)
+// @version      3.9
+// @description  Чекбоксы, копирование/вставка зон, массовое редактирование условий доставки (+ динамический расчёт/компенсация, типы оплаты с режимом "только оплата", предупреждения о доставочном блюде)
 // @match        https://my.starterapp.ru/*
 // @grant        none
 // @run-at       document-idle
@@ -378,6 +378,11 @@
     content.setAttribute('data-sz-price-field', priceFieldName);
     content.style.cssText = 'padding:16px;background:#f8f9fa;border-radius:8px;border:1px solid #e0e0e0;';
     content.innerHTML = `
+      <label style="display:flex;align-items:center;gap:8px;font-size:14px;color:#333;cursor:pointer;background:#fff3cd;border:1px solid #ffe08a;border-radius:6px;padding:8px 12px;margin-bottom:14px;">
+        <input type="checkbox" data-sz-only-payment style="width:16px;height:16px;cursor:pointer;">
+        <span>Изменить только типы оплаты <span style="color:#888;">(время, мин. сумма, цена по умолчанию и градация в каждой зоне останутся как есть)</span></span>
+      </label>
+      <div data-sz-non-payment-fields>
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin-bottom:14px;">
         <label style="font-size:14px;color:#555;">${dynamicCalc ? 'Время динамической доставки (мин)' : 'Время доставки (мин)'}
           <input type="number" placeholder="не менять" value="${existingTime}"
@@ -400,13 +405,23 @@
         ⚡ Активирован динамический расчёт — ступени градации задаются компенсацией (тип и значение), а не фиксированной ценой.
       </div>` : ''}
       <div style="font-size:14px;color:#555;margin-bottom:8px;">Градация цен <span style="color:#888;">(пустая таблица = очистить, не трогайте если не нужно менять)</span></div>
+      </div>
     `;
+    const nonPaymentWrap = content.querySelector('[data-sz-non-payment-fields]');
     const gradWrap = document.createElement('div');
     gradWrap.setAttribute('data-sz-grad-wrap', '1');
     gradWrap.appendChild(buildGradationEditor(existingGrad, dynamicCalc, dtpData?.compensation?.compensationType));
-    content.appendChild(gradWrap);
+    nonPaymentWrap.appendChild(gradWrap);
 
     content.appendChild(buildPaymentTypesEditor(dtpData?.paymentTypes));
+
+    const onlyPaymentCb = content.querySelector('[data-sz-only-payment]');
+    onlyPaymentCb.addEventListener('change', () => {
+      const disabled = onlyPaymentCb.checked;
+      nonPaymentWrap.style.opacity = disabled ? '0.4' : '1';
+      nonPaymentWrap.style.pointerEvents = disabled ? 'none' : 'auto';
+      nonPaymentWrap.querySelectorAll('input, select, button').forEach(el => { el.disabled = disabled; });
+    });
 
     if (isCollapsed) {
       const details = document.createElement('details');
@@ -567,14 +582,18 @@
       const priceFieldName = section.getAttribute('data-sz-price-field') || 'defaultDeliveryPrice';
       typeMeta[typeName] = { dynamicCalc, priceFieldName };
 
+      const onlyPayment = section.querySelector('[data-sz-only-payment]')?.checked === true;
+
       const entry = {};
-      section.querySelectorAll('[data-sz-field]').forEach(input => {
-        const fieldName = input.getAttribute('data-sz-field');
-        const val = input.value.trim();
-        if (val !== '') entry[fieldName] = parseFloat(val);
-      });
-      const gradWrap = section.querySelector('[data-sz-grad-wrap]');
-      if (gradWrap) entry.deliveryPrice = readGradation(gradWrap, dynamicCalc);
+      if (!onlyPayment) {
+        section.querySelectorAll('[data-sz-field]').forEach(input => {
+          const fieldName = input.getAttribute('data-sz-field');
+          const val = input.value.trim();
+          if (val !== '') entry[fieldName] = parseFloat(val);
+        });
+        const gradWrap = section.querySelector('[data-sz-grad-wrap]');
+        if (gradWrap) entry.deliveryPrice = readGradation(gradWrap, dynamicCalc);
+      }
       const paymentTypes = readPaymentTypes(section);
       if (paymentTypes) entry.paymentTypes = paymentTypes;
       if (Object.keys(entry).length > 0) changes[typeName] = entry;
