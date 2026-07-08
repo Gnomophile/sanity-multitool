@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Sanity — мультитул по зонам
 // @namespace    starterapp-delivery-zones
-// @version      3.7
-// @description  Чекбоксы, копирование/вставка зон, массовое редактирование условий доставки (+ динамический расчёт/компенсация, предупреждения о доставочном блюде)
+// @version      3.8
+// @description  Чекбоксы, копирование/вставка зон, массовое редактирование условий доставки (+ динамический расчёт/компенсация, типы оплаты, предупреждения о доставочном блюде)
 // @match        https://my.starterapp.ru/*
 // @grant        none
 // @run-at       document-idle
@@ -190,6 +190,62 @@
       showToast('Ошибка: ' + e.message, 'error');
     }
   }
+
+  // Типы оплаты: соответствие подписи из Sanity Studio и реального строкового
+  // значения, которое лежит в документе (поле deliveryTypePrices[].paymentTypes).
+  // Проверено вживую через API на реальном заведении.
+  const PAYMENT_TYPES = [
+    { value: 'card',          label: 'Банковская карта' },
+    { value: 'cash',          label: 'Наличные' },
+    { value: 'cardToCourier', label: 'Картой курьеру' },
+    { value: 'cashToCourier', label: 'Наличными курьеру' },
+    { value: 'sbp',           label: 'СБП' },
+    { value: 'sberpay',       label: 'SberPay' },
+    { value: 'bonus',         label: 'Бонусный счёт' },
+    { value: 'apple',         label: 'Apple Pay' },
+    { value: 'applePayWeb',   label: 'Apple Pay на странице оплаты' },
+    { value: 'google',        label: 'Google Pay' }
+  ];
+
+  function buildPaymentTypesEditor(currentValues) {
+    const wrap = document.createElement('div');
+    wrap.setAttribute('data-sz-payment-types', '1');
+    wrap.style.cssText = 'margin-top:14px;';
+    const title = document.createElement('div');
+    title.style.cssText = 'font-size:14px;color:#555;margin-bottom:8px;';
+    title.textContent = 'Типы оплаты';
+    wrap.appendChild(title);
+
+    const grid = document.createElement('div');
+    grid.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:8px 16px;';
+    const known = new Set(currentValues || []);
+    for (const pt of PAYMENT_TYPES) {
+      const label = document.createElement('label');
+      label.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:14px;color:#333;cursor:pointer;';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.setAttribute('data-sz-payment-value', pt.value);
+      cb.checked = known.has(pt.value);
+      cb.style.cssText = 'width:16px;height:16px;cursor:pointer;';
+      const span = document.createElement('span');
+      span.textContent = pt.label;
+      label.appendChild(cb);
+      label.appendChild(span);
+      grid.appendChild(label);
+    }
+    wrap.appendChild(grid);
+    return wrap;
+  }
+
+  function readPaymentTypes(container) {
+    const wrap = container.querySelector('[data-sz-payment-types]');
+    if (!wrap) return null;
+    const checked = Array.from(wrap.querySelectorAll('input[data-sz-payment-value]'))
+      .filter(cb => cb.checked)
+      .map(cb => cb.getAttribute('data-sz-payment-value'));
+    return checked;
+  }
+
     function buildGradationEditor(rows, dynamicCalc, defaultCompType) {
     const wrap = document.createElement('div');
     wrap.style.cssText = 'margin-top:6px;';
@@ -349,6 +405,8 @@
     gradWrap.setAttribute('data-sz-grad-wrap', '1');
     gradWrap.appendChild(buildGradationEditor(existingGrad, dynamicCalc, dtpData?.compensation?.compensationType));
     content.appendChild(gradWrap);
+
+    content.appendChild(buildPaymentTypesEditor(dtpData?.paymentTypes));
 
     if (isCollapsed) {
       const details = document.createElement('details');
@@ -517,6 +575,8 @@
       });
       const gradWrap = section.querySelector('[data-sz-grad-wrap]');
       if (gradWrap) entry.deliveryPrice = readGradation(gradWrap, dynamicCalc);
+      const paymentTypes = readPaymentTypes(section);
+      if (paymentTypes) entry.paymentTypes = paymentTypes;
       if (Object.keys(entry).length > 0) changes[typeName] = entry;
     }
     if (Object.keys(changes).length === 0) { showToast('Нет изменений для применения', 'warning'); return; }
