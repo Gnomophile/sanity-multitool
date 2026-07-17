@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Sanity — мультитул по зонам
 // @namespace    starterapp-delivery-zones
-// @version      3.10
+// @version      3.11
 // @description  Чекбоксы, копирование/вставка зон, массовое редактирование условий доставки (+ динамический расчёт/компенсация, типы оплаты с режимом "только оплата", предупреждения о доставочном блюде)
 // @match        https://my.starterapp.ru/*
 // @grant        none
