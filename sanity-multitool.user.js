@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         Sanity — мультитул по зонам
 // @namespace    starterapp-delivery-zones
-// @version      3.9
+// @version      3.10
 // @description  Чекбоксы, копирование/вставка зон, массовое редактирование условий доставки (+ динамический расчёт/компенсация, типы оплаты с режимом "только оплата", предупреждения о доставочном блюде)
 // @match        https://my.starterapp.ru/*
 // @grant        none
-// @run-at       document-idle
+// @run-at       document-start
 // @updateURL    https://raw.githubusercontent.com/Gnomophile/sanity-multitool/main/sanity-multitool.user.js
 // @downloadURL  https://raw.githubusercontent.com/Gnomophile/sanity-multitool/main/sanity-multitool.user.js
 // ==/UserScript==
@@ -15,6 +15,95 @@
 
   let clipboard   = null;
   let isInjecting = false;
+
+  // ---------------------------------------------------------------------
+  // Определение Project ID.
+  //
+  // Основной источник — лог "SANITY PROJECT ID >>>>>>>>>>>>>> <id>",
+  // который печатается один раз при загрузке конфига workspace. Чтобы его
+  // гарантированно поймать, перехватываем console.log ещё до того, как
+  // Studio успевает что-либо вывести (@run-at document-start).
+  //
+  // Значение кешируется на всю жизнь вкладки: при переходе между
+  // заведениями внутри одного workspace (SPA-роутинг, без полной
+  // перезагрузки) лог повторно не печатается, поэтому искать его заново
+  // при каждом клике не нужно и не получится.
+  //
+  // Фолбэк — перехват реальных запросов к *.api.sanity.io. Он срабатывает,
+  // если по какой-то причине лог не был пойман (например, скрипт
+  // подключился уже после загрузки страницы), и заодно подстраховывает на
+  // случай, если формат дебаг-лога когда-нибудь изменится или его уберут.
+  // ---------------------------------------------------------------------
+
+  let cachedProjectId = null;
+  // Workspace (первый сегмент пути), для которого был получен cachedProjectId.
+  // Нужен, чтобы отличить "id ещё не пришёл" от "id устарел после смены
+  // workspace" — во втором случае отдавать старое значение опасно, можно
+  // записать зону в чужой проект.
+  let cachedWorkspace = null;
+
+  const PROJECT_ID_LOG_RE = /SANITY PROJECT ID\s*>+\s*([a-z0-9]+)/i;
+
+  function currentWorkspace() {
+    return window.location.pathname.split('/').filter(Boolean)[0] || null;
+  }
+
+  function setCachedProjectId(id) {
+    cachedProjectId = id;
+    cachedWorkspace  = currentWorkspace();
+  }
+
+  function tryCaptureFromArgs(args) {
+    for (const a of args) {
+      if (typeof a !== 'string') continue;
+      const m = a.match(PROJECT_ID_LOG_RE);
+      if (m) {
+        // Всегда перезаписываем: при переключении workspace через SPA-роутинг
+        // (без перезагрузки страницы) появится новый лог с новым id, и он
+        // должен вытеснить старый, а не быть проигнорированным.
+        setCachedProjectId(m[1]);
+        break;
+      }
+    }
+  }
+
+  const origConsoleLog = console.log.bind(console);
+  console.log = function (...args) {
+    tryCaptureFromArgs(args);
+    return origConsoleLog(...args);
+  };
+
+  const origFetch = window.fetch;
+  window.fetch = function (input, init) {
+    const url = typeof input === 'string' ? input : input?.url;
+    const m = url && url.match(/^https?:\/\/([a-z0-9]+)\.api\.sanity\.io/);
+    if (m) setCachedProjectId(m[1]);
+    return origFetch.call(this, input, init);
+  };
+
+  function getProjectId() {
+    const ws = currentWorkspace();
+
+    // Кеш валиден только для того workspace, для которого он был получен.
+    if (cachedProjectId && cachedWorkspace === ws) return cachedProjectId;
+
+    // Кеш есть, но для другого workspace — значит, переход только что
+    // произошёл, а свежий лог/запрос ещё не долетели. Отдавать старое
+    // значение нельзя (можно записать данные в чужой проект), поэтому ждём
+    // следующего console.log/fetch — они наступят практически сразу, как
+    // только Studio догрузит конфиг нового workspace.
+    if (cachedProjectId && cachedWorkspace !== ws) return null;
+
+    // Кеша ещё не было вообще (самая первая загрузка страницы, до того как
+    // прошёл первый console.log/fetch) — в этом единственном случае можно
+    // подстраховаться буфером resource timing, он на этот момент относится
+    // ровно к текущему workspace.
+    const entries = performance.getEntriesByType('resource').map(e => e.name);
+    const entry = entries.find(n => n.includes('.api.sanity.io'));
+    const fromPerf = entry?.match(/^https?:\/\/([a-z0-9]+)\.api\.sanity\.io/)?.[1] || null;
+    if (fromPerf) setCachedProjectId(fromPerf);
+    return cachedProjectId;
+  }
 
   function newKey() {
     const arr = new Uint8Array(6);
@@ -33,12 +122,6 @@
       });
     }
     return c;
-  }
-
-  function getProjectId() {
-    const entries = performance.getEntriesByType('resource').map(e => e.name);
-    const entry = entries.find(n => n.includes('.api.sanity.io'));
-    return entry?.match(/^https?:\/\/([a-z0-9]+)\.api\.sanity\.io/)?.[1] || null;
   }
 
   function getShopId() {
@@ -120,7 +203,7 @@
   async function onCopy() {
     const projectId = getProjectId();
     const shopId    = getShopId();
-    if (!projectId) { showToast('Не удалось определить Project ID', 'error'); return; }
+    if (!projectId) { showToast('Не удалось определить Project ID. Если вы только что переключили заведение из другого проекта — подождите секунду и повторите. Если не помогает — обновите страницу.', 'error'); return; }
     if (!shopId)    { showToast('Не удалось определить ID заведения', 'error'); return; }
     showToast('Копируем зоны...', 'info');
     try {
@@ -141,7 +224,7 @@
     if (!clipboard) { showToast('Сначала нажмите «Копировать зоны» на заведении-источнике', 'warning'); return; }
     const projectId = getProjectId();
     const shopId    = getShopId();
-    if (!projectId) { showToast('Не удалось определить Project ID', 'error'); return; }
+    if (!projectId) { showToast('Не удалось определить Project ID. Если вы только что переключили заведение из другого проекта — подождите секунду и повторите. Если не помогает — обновите страницу.', 'error'); return; }
     if (!shopId)    { showToast('Не удалось определить ID заведения', 'error'); return; }
     showToast('Вставляем зоны...', 'info');
     try {
@@ -445,7 +528,7 @@
   async function onEditConditions() {
     const projectId = getProjectId();
     const shopId    = getShopId();
-    if (!projectId) { showToast('Не удалось определить Project ID', 'error'); return; }
+    if (!projectId) { showToast('Не удалось определить Project ID. Если вы только что переключили заведение из другого проекта — подождите секунду и повторите. Если не помогает — обновите страницу.', 'error'); return; }
     if (!shopId)    { showToast('Не удалось определить ID заведения', 'error'); return; }
     showToast('Загружаем данные...', 'info');
     let doc, typeNameMap;
@@ -741,7 +824,17 @@
     debounceTimer = setTimeout(inject, 150);
   });
 
-  observer.observe(document.body, { childList: true, subtree: true });
-  inject();
+  function startObserving() {
+    observer.observe(document.body, { childList: true, subtree: true });
+    inject();
+  }
+
+  // Скрипт теперь стартует на document-start, поэтому document.body может
+  // ещё не существовать в момент выполнения — ждём его появления.
+  if (document.body) {
+    startObserving();
+  } else {
+    document.addEventListener('DOMContentLoaded', startObserving, { once: true });
+  }
 
 })();
