@@ -42,7 +42,8 @@
   // записать зону в чужой проект.
   let cachedWorkspace = null;
 
-  const PROJECT_ID_LOG_RE = /SANITY PROJECT ID\s*>+\s*([a-z0-9]+)/i;
+  const PROJECT_ID_LOG_RE = /SANITY PROJECT ID[\s>:=-]*([a-z0-9]{6,})/i;
+  const origConsoleWarn = console.warn.bind(console);
 
   function currentWorkspace() {
     return window.location.pathname.split('/').filter(Boolean)[0] || null;
@@ -54,24 +55,33 @@
   }
 
   function tryCaptureFromArgs(args) {
-    for (const a of args) {
-      if (typeof a !== 'string') continue;
-      const m = a.match(PROJECT_ID_LOG_RE);
-      if (m) {
-        // Всегда перезаписываем: при переключении workspace через SPA-роутинг
-        // (без перезагрузки страницы) появится новый лог с новым id, и он
-        // должен вытеснить старый, а не быть проигнорированным.
-        setCachedProjectId(m[1]);
-        break;
-      }
+    // Лог может печататься как одной строкой, так и несколькими отдельными
+    // аргументами (например: console.log('SANITY PROJECT ID', '>>>>', id)) —
+    // склеиваем всё в одну строку, чтобы регэксп ловил оба варианта.
+    const combined = args
+      .filter(a => typeof a === 'string' || typeof a === 'number')
+      .join(' ');
+    if (!combined.includes('SANITY PROJECT ID')) return;
+    const m = combined.match(PROJECT_ID_LOG_RE);
+    if (m) {
+      // Всегда перезаписываем: при переключении workspace через SPA-роутинг
+      // (без перезагрузки страницы) появится новый лог с новым id, и он
+      // должен вытеснить старый, а не быть проигнорированным.
+      setCachedProjectId(m[1]);
+    } else {
+      // Формат лога отличается от ожидаемого — не падаем молча, оставляем
+      // подсказку в консоли, чтобы можно было быстро поправить регэксп.
+      origConsoleWarn('[SZ] Нашёл "SANITY PROJECT ID" в логе, но не смог извлечь id из:', combined);
     }
   }
 
-  const origConsoleLog = console.log.bind(console);
-  console.log = function (...args) {
-    tryCaptureFromArgs(args);
-    return origConsoleLog(...args);
-  };
+  for (const method of ['log', 'info', 'warn', 'debug']) {
+    const orig = console[method].bind(console);
+    console[method] = function (...args) {
+      tryCaptureFromArgs(args);
+      return orig(...args);
+    };
+  }
 
   const origFetch = window.fetch;
   window.fetch = function (input, init) {
